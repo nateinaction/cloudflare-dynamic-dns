@@ -33,13 +33,6 @@ func TestJsonify(t *testing.T) {
 	}
 }
 
-func TestGetIP(t *testing.T) {
-	ip := getIP()
-	if len(ip) == 0 {
-		t.Fail()
-	}
-}
-
 func TestGetCredentials(t *testing.T) {
 	os.Setenv("CF_EMAIL", "email@email.com")
 	os.Setenv("CF_KEY", "myAPIKey")
