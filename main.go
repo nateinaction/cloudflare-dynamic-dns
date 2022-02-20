@@ -44,7 +44,7 @@ func main() {
 		log.Fatalf("failed to parse config: %s\n", err)
 	}
 
-	log.Printf("Ensuring %d records", len(cfg.Records))
+	log.Printf("ensuring %d records", len(cfg.Records))
 
 	cfgZones := cfg.GetZones()
 	cfgRecords := cfg.GetRecords()
