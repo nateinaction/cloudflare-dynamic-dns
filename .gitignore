@@ -1,2 +1,3 @@
-cloudflare-go
 dist/
+config.json
+secret.json
