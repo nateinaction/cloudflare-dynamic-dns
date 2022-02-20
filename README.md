@@ -1,7 +1,7 @@
 # cloudflare-dynamic-dns
-Dynamic DNS Client for Cloudflare
+[![ci](https://github.com/nateinaction/cloudflare-dynamic-dns/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/nateinaction/cloudflare-dynamic-dns/actions/workflows/ci.yaml)
 
-cloudflare-dynamic-dns is a dynamic dns client that can be used to update DNS records in Cloudflare.
+`cloudflare-dynamic-dns` is a dynamic dns client that can be used to update DNS records in Cloudflare.
 
 ## Use
 
