@@ -3,8 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
-	"html/template"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -12,215 +13,204 @@ import (
 	"time"
 )
 
-//Global variable declarations
-var interval time.Duration = 30
-var tableData []table = make([]table, 10)
-var setTime []string = make([]string, 10)
-var numOfRecords int
-var email string
-var gapik string
-var zone string
-var templateFile string
-var environment string = "prod"
-
-//For html table
-type table struct {
-	Name  string
-	IP    string
-	Proxy bool
-	Time  string
+type cfClient struct {
+	Email  string
+	Token  string
+	Zone   string
+	Url    string
+	Client *http.Client
 }
 
-//JSON response struct
-type response struct {
-	Result []struct {
-		Identifier string `json:"id"`
-		Type       string `json:"type"`
-		Name       string `json:"name"`
-		Proxied    bool   `json:"proxied"`
-		Content    string `json:"content"`
-	} `json:"result"`
-}
-
-//JSON PUT struct
-type sendme struct {
-	RecordType string `json:"type"`
-	Name       string `json:"name"`
-	Content    string `json:"content"`
-	Proxied    bool   `json:"proxied"`
-}
-
-//Uniform http.NewRequest template for mutliple operations
-func httpRequest(client *http.Client, reqType string, url string, instruction []byte, email string, gapik string, zone string) []byte {
-	var req *http.Request
-	var err error
-	if instruction == nil {
-		req, err = http.NewRequest(reqType, url, nil)
-	} else {
-		req, err = http.NewRequest(reqType, url, bytes.NewBuffer(instruction))
+// createCfClient Reads credentials from environment variables
+func createCfClient() (*cfClient, error) {
+	email := os.Getenv("CF_EMAIL")
+	token := os.Getenv("CF_TOKEN")
+	zone := os.Getenv("CF_ZONE")
+	if email == "" || token == "" || zone == "" {
+		return nil, fmt.Errorf("CF_EMAIL, CF_TOKEN, and CF_ZONE must be set")
 	}
+	return &cfClient{
+		Email:  email,
+		Token:  token,
+		Url:    fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records", zone),
+		Client: &http.Client{},
+	}, nil
+}
+
+type DnsRecord struct {
+	Id      string `json:"id,omitempty"`
+	Type    string `json:"type,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Proxied bool   `json:"proxied,omitempty"`
+	Content string `json:"content,omitempty"`
+	Ttl     int    `json:"ttl,omitempty"`
+}
+
+type DnsRecordsResponse struct {
+	Records []DnsRecord `json:"result"`
+}
+
+func (c *cfClient) newRequest(method, url string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, url, body)
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
-	req.Header.Set("X-Auth-Email", email)
-	req.Header.Set("X-Auth-Key", gapik)
+
+	req.Header.Set("X-Auth-Email", c.Email)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.Token))
 	req.Header.Set("Content-type", "application/json")
+	return req, nil
+}
 
-	resp, err := client.Do(req)
+// GetDnsRecords Retrieves DNS record data from Cloudflare
+func (c *cfClient) GetDnsRecords() (*DnsRecordsResponse, error) {
+	req, err := c.newRequest("GET", fmt.Sprintf("%s?type=A", c.Url), nil)
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
 
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatalln(err)
+		return nil, err
 	}
-	return body
+
+	data := &DnsRecordsResponse{}
+	if err := json.Unmarshal([]byte(body), &data); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
-//Unmarshals the JSON response into the 'response' struct type
-func unjsonify(body []byte) response {
-	var jsonData response
-	err := json.Unmarshal([]byte(body), &jsonData)
-	if err != nil {
-		log.Fatalln(err)
+// UpdateRecord Sets the IP for an existing DNS record
+func (c *cfClient) UpdateRecord(ip, id string) error {
+	record := DnsRecord{
+		Content: ip,
 	}
-	return jsonData
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	req, err := c.newRequest("PATCH", fmt.Sprintf("%s/%s", c.Url, id), bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return nil
 }
 
-//Creates a JSON payload of type 'sendme'
-func jsonify(recordType string, name string, ip string, proxied bool) []byte {
-	data := sendme{
-		RecordType: recordType,
-		Name:       name,
-		Content:    ip,
-		Proxied:    proxied,
+// CreateRecord Sets the IP for a new DNS record
+func (c *cfClient) CreateRecord(name, ip string) error {
+	record := DnsRecord{
+		Type:    "A",
+		Name:    name,
+		Content: ip,
+		Ttl:     1,
 	}
-	jsonData, err := json.Marshal(data)
+	data, err := json.Marshal(record)
 	if err != nil {
-		log.Fatalln(err)
+		return err
 	}
-	return jsonData
+
+	req, err := c.newRequest("POST", c.Url, bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return nil
 }
 
-//Finds the computer's current public IP address and returns it
-func getIP() string {
-	resp, err := http.Get("http://checkip.amazonaws.com")
+// getPublicIP Finds the current network's public IP address
+func getPublicIP() (string, error) {
+	resp, err := http.Get("https://checkip.amazonaws.com")
 	if err != nil {
-		log.Fatalln(err)
+		return "", err
 	}
-
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatalln(err)
+		return "", err
 	}
-	return string(bytes.TrimSpace(body))
+	return string(bytes.TrimSpace(body)), nil
 }
 
-//Reads credentials via shell variables
-func getCredentials() (string, string, string) {
-	email = os.Getenv("CF_EMAIL")
-	gapik = os.Getenv("CF_KEY")
-	zone = os.Getenv("CF_ZONE")
+type arrayFlags []string
 
-	//Sets environment to the shell variable if it exists. Uses the default "prod" in all other cases
-	//Exporting the shell variable CF_ENV to "dev" will set the html template to be in the local repository directory
-	if envSelect := os.Getenv("CF_ENV"); len(envSelect) > 0 {
-		environment = envSelect
-	}
-
-	//Checks to make sure email, global API key, and zone are set.
-	if email == "" || gapik == "" || zone == "" {
-		fmt.Println("Account email, API key, or zone is not set")
-		os.Exit(1)
-	}
-	return email, gapik, zone
+func (i *arrayFlags) String() string {
+	return "my string representation"
 }
 
-func update(client *http.Client) {
-	fmt.Println("Starting program successfully... Output will be displayed only when records are updated.")
-	//Infinite loop to update records over time
-	for {
-		//GETS current record information
-		url := "https://api.cloudflare.com/client/v4/zones/" + zone + "/dns_records"
-		body := httpRequest(client, "GET", url, nil, email, gapik, zone)
-		jsonData := unjsonify(body)
-
-		numOfRecords = len(jsonData.Result)
-		publicIP := getIP()
-		for i := 0; i < numOfRecords; i++ {
-			recordType := jsonData.Result[i].Type
-			recordIP := jsonData.Result[i].Content
-			recordIdentifier := jsonData.Result[i].Identifier
-			recordName := jsonData.Result[i].Name
-			recordProxied := jsonData.Result[i].Proxied
-
-			//Proceeds if is an A Record, AND current IP differs from recorded one
-			if recordType == "A" && recordIP != publicIP {
-				jsonData := jsonify(recordType, recordName, publicIP, recordProxied) //Creates JSON payload
-				//PUTS new record information
-				recordURL := url + "/" + recordIdentifier
-				httpRequest(client, "PUT", recordURL, jsonData, email, gapik, zone)
-
-				//Prints after successful update
-				setTime[i] = time.Now().Format("2006-01-02 3:4:5 PM")
-
-				tableData[i] = table{
-					Name:  recordName,
-					IP:    publicIP,
-					Proxy: recordProxied,
-					Time:  setTime[i],
-				}
-				fmt.Println("Current Time: " + setTime[i] + "\nUpdated Record: " + recordName + "\nUpdated IP: " + publicIP + "\n")
-			} else {
-				tableData[i] = table{
-					Name:  recordName,
-					IP:    publicIP,
-					Proxy: recordProxied,
-					Time:  setTime[i],
-				}
-			}
-		}
-		time.Sleep(interval * time.Second) //Sleeping for n seconds
-	}
-}
-
-//Creates a new mux with handler(s)
-func setupHandlers() *http.ServeMux {
-	mux := http.NewServeMux()
-
-	//Dynamic handlers
-	mux.HandleFunc("/", indexHandler)
-
-	return mux
-}
-func indexHandler(w http.ResponseWriter, r *http.Request) {
-	if environment == "dev" {
-		templateFile = "./index.html"
-	} else if environment == "prod" {
-		templateFile = "/index.html"
-	}
-	indexTmpl, err := template.ParseFiles(templateFile)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	indexTmpl.Execute(w, tableData[0:numOfRecords])
+func (i *arrayFlags) Set(value string) error {
+	*i = append(*i, value)
+	return nil
 }
 
 func main() {
-	getCredentials()
+	recordsToUpdate := arrayFlags{}
+	flag.Var(&recordsToUpdate, "r", "Records (sub.domain.tld) to update with current IP")
+	flag.Parse()
 
-	timeout := time.Duration(120 * time.Second)
-	client := &http.Client{
-		Timeout: timeout,
+	cfClient, err := createCfClient()
+	if err != nil {
+		log.Fatalln(err)
 	}
 
-	go update(client)
+	previousIp := "startup"
+	for {
+		publicIp, err := getPublicIP()
+		if err != nil {
+			log.Printf("failed to get public ip: %s\n", err)
+		}
 
-	mux := setupHandlers()
-	log.Fatalln(http.ListenAndServe(":8080", mux))
+		if previousIp != publicIp {
+			log.Printf("ip change detected: %s -> %s\n", previousIp, publicIp)
+			cfRecords, err := cfClient.GetDnsRecords()
+			if err != nil {
+				log.Printf("failed to get cloudflare dns records: %s\n", err)
+			}
+
+			rMap := map[string]DnsRecord{}
+			for _, record := range cfRecords.Records {
+				rMap[record.Name] = record
+			}
+
+			for _, name := range recordsToUpdate {
+				if _, ok := rMap[name]; !ok {
+					if err := cfClient.CreateRecord(name, publicIp); err != nil {
+						log.Printf("failed to create record: %s\n", err)
+					}
+					log.Printf("added record: %s\n", name)
+				} else {
+					// Prevent additional calls to cloudflare if the IP hasn't changed, for example, on application startup
+					if rMap[name].Content != publicIp {
+						if err := cfClient.UpdateRecord(publicIp, rMap[name].Id); err != nil {
+							log.Printf("failed to update record: %s\n", err)
+						}
+						log.Printf("updated record: %s\n", name)
+					}
+				}
+			}
+			previousIp = publicIp
+		}
+		time.Sleep(3600 * time.Second)
+	}
 }
