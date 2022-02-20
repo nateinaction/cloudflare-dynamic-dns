@@ -18,10 +18,9 @@ var tableData []table = make([]table, 10)
 var setTime []string = make([]string, 10)
 var numOfRecords int
 var email string
-var gapik string
+var token string
 var zone string
-var templateFile string
-var environment string = "prod"
+var recordToUpdate arrayFlags
 
 //For html table
 type table struct {
@@ -50,8 +49,19 @@ type sendme struct {
 	Proxied    bool   `json:"proxied"`
 }
 
+type arrayFlags []string
+
+func (i *arrayFlags) String() string {
+	return "my string representation"
+}
+
+func (i *arrayFlags) Set(value string) error {
+	*i = append(*i, value)
+	return nil
+}
+
 //Uniform http.NewRequest template for mutliple operations
-func httpRequest(client *http.Client, reqType string, url string, instruction []byte, email string, gapik string, zone string) []byte {
+func httpRequest(client *http.Client, reqType string, url string, instruction []byte, email string, token string, zone string) []byte {
 	var req *http.Request
 	var err error
 	if instruction == nil {
@@ -63,7 +73,7 @@ func httpRequest(client *http.Client, reqType string, url string, instruction []
 		log.Fatalln(err)
 	}
 	req.Header.Set("X-Auth-Email", email)
-	req.Header.Set("X-Auth-Key", gapik)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	req.Header.Set("Content-type", "application/json")
 
 	resp, err := client.Do(req)
@@ -124,64 +134,47 @@ func getIP() string {
 //Reads credentials via shell variables
 func getCredentials() (string, string, string) {
 	email = os.Getenv("CF_EMAIL")
-	gapik = os.Getenv("CF_KEY")
+	token = os.Getenv("CF_KEY")
 	zone = os.Getenv("CF_ZONE")
 
-	//Sets environment to the shell variable if it exists. Uses the default "prod" in all other cases
-	//Exporting the shell variable CF_ENV to "dev" will set the html template to be in the local repository directory
-	if envSelect := os.Getenv("CF_ENV"); len(envSelect) > 0 {
-		environment = envSelect
-	}
-
 	//Checks to make sure email, global API key, and zone are set.
-	if email == "" || gapik == "" || zone == "" {
-		fmt.Println("Account email, API key, or zone is not set")
+	if email == "" || token == "" || zone == "" {
+		fmt.Println("Account email, API token, or zone is not set")
 		os.Exit(1)
 	}
-	return email, gapik, zone
+	return email, token, zone
 }
 
-func update(client *http.Client) {
+func update(client *http.Client, recordNames arrayFlags) {
 	fmt.Println("Starting program successfully... Output will be displayed only when records are updated.")
 	//Infinite loop to update records over time
 	for {
 		//GETS current record information
 		url := "https://api.cloudflare.com/client/v4/zones/" + zone + "/dns_records"
-		body := httpRequest(client, "GET", url, nil, email, gapik, zone)
+		body := httpRequest(client, "GET", url, nil, email, token, zone)
 		jsonData := unjsonify(body)
 
-		numOfRecords = len(jsonData.Result)
+		cfRecords := map[string]Result
+		for _, record := range jsonData.Result {
+			if recordType == "A" {
+				cfRecords[record.Name] = record
+			}
+		}
+
 		publicIP := getIP()
-		for i := 0; i < numOfRecords; i++ {
-			recordType := jsonData.Result[i].Type
-			recordIP := jsonData.Result[i].Content
-			recordIdentifier := jsonData.Result[i].Identifier
-			recordName := jsonData.Result[i].Name
-			recordProxied := jsonData.Result[i].Proxied
-
-			//Proceeds if is an A Record, AND current IP differs from recorded one
-			if recordType == "A" && recordIP != publicIP {
-				jsonData := jsonify(recordType, recordName, publicIP, recordProxied) //Creates JSON payload
-				//PUTS new record information
-				recordURL := url + "/" + recordIdentifier
-				httpRequest(client, "PUT", recordURL, jsonData, email, gapik, zone)
-
-				//Prints after successful update
-				setTime[i] = time.Now().Format("2006-01-02 3:4:5 PM")
-
-				tableData[i] = table{
-					Name:  recordName,
-					IP:    publicIP,
-					Proxy: recordProxied,
-					Time:  setTime[i],
-				}
-				fmt.Println("Current Time: " + setTime[i] + "\nUpdated Record: " + recordName + "\nUpdated IP: " + publicIP + "\n")
+		for _, name := range recordNames {
+			jsonData := []byte{}
+			if _, ok := cfRecords[name]; !ok {
+				jsonData = jsonify("A", name, publicIP, false)
+				httpRequest(client, "POST", url, jsonData, email, token, zone)
+				fmt.Println("Added Record: " + name + " Updated IP: " + publicIP)
 			} else {
-				tableData[i] = table{
-					Name:  recordName,
-					IP:    publicIP,
-					Proxy: recordProxied,
-					Time:  setTime[i],
+				// Update record if it does not match current IP
+				if cfRecords[name].Content != publicIP {
+					jsonData = jsonify(cfRecords[name].Type, recordName, publicIP, cfRecords[name].Proxied)
+					recordURL := url + "/" + cfRecords[name].Identifier
+					httpRequest(client, "PUT", recordURL, jsonData, email, token, zone)
+					fmt.Println("Updated Record: " + name + " Updated IP: " + publicIP)
 				}
 			}
 		}
@@ -189,38 +182,16 @@ func update(client *http.Client) {
 	}
 }
 
-//Creates a new mux with handler(s)
-func setupHandlers() *http.ServeMux {
-	mux := http.NewServeMux()
-
-	//Dynamic handlers
-	mux.HandleFunc("/", indexHandler)
-
-	return mux
-}
-func indexHandler(w http.ResponseWriter, r *http.Request) {
-	if environment == "dev" {
-		templateFile = "./index.html"
-	} else if environment == "prod" {
-		templateFile = "/index.html"
-	}
-	indexTmpl, err := template.ParseFiles(templateFile)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	indexTmpl.Execute(w, tableData[0:numOfRecords])
-}
-
 func main() {
 	getCredentials()
+
+	flag.Var(&recordToUpdate, "r", "Records (sub.domain.tld) to update with current IP")
+	flag.Parse()
 
 	timeout := time.Duration(120 * time.Second)
 	client := &http.Client{
 		Timeout: timeout,
 	}
 
-	go update(client)
-
-	mux := setupHandlers()
-	log.Fatalln(http.ListenAndServe(":8080", mux))
+	go update(client, recordsToUpdate)
 }

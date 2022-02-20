@@ -7,23 +7,6 @@ import (
 	"os"
 )
 
-func TestIndexHandler(t *testing.T) {
-	environment = "dev"
-	req, err := http.NewRequest("GET", "/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	respRecord := httptest.NewRecorder()
-	handler := setupHandlers()
-	handler.ServeHTTP(respRecord, req)
-
-	resp := respRecord.Result()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Unexpected status code %d", resp.StatusCode)
-	}
-}
-
 func TestJsonify(t *testing.T) {
 	var recordType, name, ip string = "A", "sub.example.com", "127.0.0.1"
 	var proxied bool = true
