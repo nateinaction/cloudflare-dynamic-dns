@@ -1,8 +1,7 @@
 # cloudflare-go
-Dynamic DNS record updater written in Golang
+Dynamic DNS Client for Cloudflare
 
-[![pipeline status](https://gitlab.com/brandonbutler/cloudflare-go/badges/master/pipeline.svg)](https://gitlab.com/brandonbutler/cloudflare-go/commits/master)
-[![coverage report](https://gitlab.com/brandonbutler/cloudflare-go/badges/master/coverage.svg)](https://gitlab.com/brandonbutler/cloudflare-go/commits/master)
+
 
 # Use
 
@@ -11,16 +10,11 @@ You can either start this container via `docker run` or `docker-compose`.
 **Quick Start:** 
 ```
 docker container run \
-  -p 8080:8080 \
   -e CF_EMAIL="email@email.com" \
-  -e CF_KEY="my_global_api_key" \
+  -e CF_TOKEN="my_global_api_key" \
   -e CF_ZONE="my_zone_id" \
   starttoaster/cloudflare-go:latest
 ```
-
-View the webUI in your web browser to see it run: `localhost:8080`
-
-![Image of webUI](https://i.imgur.com/qziKSxC.png)
 
 
 Example docker-compose.yml:

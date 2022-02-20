@@ -1,28 +1,23 @@
 package main
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"testing"
 	"os"
+	"testing"
 )
 
-func TestJsonify(t *testing.T) {
-	var recordType, name, ip string = "A", "sub.example.com", "127.0.0.1"
-	var proxied bool = true
-	jsonData := jsonify(recordType, name, ip, proxied)
-	if len(jsonData) == 0 {
+func TestCreateCfClientWithOutEnv(t *testing.T) {
+	_, err := createCfClient()
+	if err == nil {
 		t.Fail()
 	}
 }
 
-func TestGetCredentials(t *testing.T) {
+func TestCreateCfClientWithEnv(t *testing.T) {
 	os.Setenv("CF_EMAIL", "email@email.com")
-	os.Setenv("CF_KEY", "myAPIKey")
+	os.Setenv("CF_TOKEN", "myAPIToken")
 	os.Setenv("CF_ZONE", "myDNSZone")
-	email, gapik, zone := getCredentials()
-
-	if email == "" || gapik == "" || zone == "" {
+	_, err := createCfClient()
+	if err != nil {
 		t.Fail()
 	}
 }

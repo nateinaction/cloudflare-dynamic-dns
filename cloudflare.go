@@ -3,8 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"fmt"
-	"html/template"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -12,41 +13,144 @@ import (
 	"time"
 )
 
-//Global variable declarations
-var interval time.Duration = 30
-var tableData []table = make([]table, 10)
-var setTime []string = make([]string, 10)
-var numOfRecords int
-var email string
-var token string
-var zone string
-var recordToUpdate arrayFlags
-
-//For html table
-type table struct {
-	Name  string
-	IP    string
-	Proxy bool
-	Time  string
+type cfClient struct {
+	Email  string
+	Token  string
+	Zone   string
+	Url    string
+	Client *http.Client
 }
 
-//JSON response struct
-type response struct {
-	Result []struct {
-		Identifier string `json:"id"`
-		Type       string `json:"type"`
-		Name       string `json:"name"`
-		Proxied    bool   `json:"proxied"`
-		Content    string `json:"content"`
-	} `json:"result"`
+// createCfClient Reads credentials from environment variables
+func createCfClient() (*cfClient, error) {
+	email := os.Getenv("CF_EMAIL")
+	token := os.Getenv("CF_TOKEN")
+	zone := os.Getenv("CF_ZONE")
+	if email == "" || token == "" || zone == "" {
+		return nil, fmt.Errorf("CF_EMAIL, CF_TOKEN, and CF_ZONE must be set")
+	}
+	return &cfClient{
+		Email:  email,
+		Token:  token,
+		Url:    fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records", zone),
+		Client: &http.Client{},
+	}, nil
 }
 
-//JSON PUT struct
-type sendme struct {
-	RecordType string `json:"type"`
-	Name       string `json:"name"`
-	Content    string `json:"content"`
-	Proxied    bool   `json:"proxied"`
+type DnsRecord struct {
+	Id      string `json:"id,omitempty"`
+	Type    string `json:"type,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Proxied bool   `json:"proxied,omitempty"`
+	Content string `json:"content,omitempty"`
+	Ttl     int    `json:"ttl,omitempty"`
+}
+
+type DnsRecordsResponse struct {
+	Records []DnsRecord `json:"result"`
+}
+
+func (c *cfClient) newRequest(method, url string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("X-Auth-Email", c.Email)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.Token))
+	req.Header.Set("Content-type", "application/json")
+	return req, nil
+}
+
+// GetDnsRecords Retrieves DNS record data from Cloudflare
+func (c *cfClient) GetDnsRecords() (*DnsRecordsResponse, error) {
+	req, err := c.newRequest("GET", fmt.Sprintf("%s?type=A", c.Url), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	data := &DnsRecordsResponse{}
+	if err := json.Unmarshal([]byte(body), &data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// UpdateRecord Sets the IP for an existing DNS record
+func (c *cfClient) UpdateRecord(ip, id string) error {
+	record := DnsRecord{
+		Content: ip,
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	req, err := c.newRequest("PATCH", fmt.Sprintf("%s/%s", c.Url, id), bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return nil
+}
+
+// CreateRecord Sets the IP for a new DNS record
+func (c *cfClient) CreateRecord(name, ip string) error {
+	record := DnsRecord{
+		Type:    "A",
+		Name:    name,
+		Content: ip,
+		Ttl:     1,
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	req, err := c.newRequest("POST", c.Url, bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return nil
+}
+
+// getPublicIP Finds the current network's public IP address
+func getPublicIP() (string, error) {
+	resp, err := http.Get("https://checkip.amazonaws.com")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(bytes.TrimSpace(body)), nil
 }
 
 type arrayFlags []string
@@ -60,138 +164,53 @@ func (i *arrayFlags) Set(value string) error {
 	return nil
 }
 
-//Uniform http.NewRequest template for mutliple operations
-func httpRequest(client *http.Client, reqType string, url string, instruction []byte, email string, token string, zone string) []byte {
-	var req *http.Request
-	var err error
-	if instruction == nil {
-		req, err = http.NewRequest(reqType, url, nil)
-	} else {
-		req, err = http.NewRequest(reqType, url, bytes.NewBuffer(instruction))
-	}
-	if err != nil {
-		log.Fatalln(err)
-	}
-	req.Header.Set("X-Auth-Email", email)
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
-	req.Header.Set("Content-type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Fatalln(err)
-	}
-
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	return body
-}
-
-//Unmarshals the JSON response into the 'response' struct type
-func unjsonify(body []byte) response {
-	var jsonData response
-	err := json.Unmarshal([]byte(body), &jsonData)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	return jsonData
-}
-
-//Creates a JSON payload of type 'sendme'
-func jsonify(recordType string, name string, ip string, proxied bool) []byte {
-	data := sendme{
-		RecordType: recordType,
-		Name:       name,
-		Content:    ip,
-		Proxied:    proxied,
-	}
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	return jsonData
-}
-
-//Finds the computer's current public IP address and returns it
-func getIP() string {
-	resp, err := http.Get("http://checkip.amazonaws.com")
-	if err != nil {
-		log.Fatalln(err)
-	}
-
-	defer resp.Body.Close()
-
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	return string(bytes.TrimSpace(body))
-}
-
-//Reads credentials via shell variables
-func getCredentials() (string, string, string) {
-	email = os.Getenv("CF_EMAIL")
-	token = os.Getenv("CF_KEY")
-	zone = os.Getenv("CF_ZONE")
-
-	//Checks to make sure email, global API key, and zone are set.
-	if email == "" || token == "" || zone == "" {
-		fmt.Println("Account email, API token, or zone is not set")
-		os.Exit(1)
-	}
-	return email, token, zone
-}
-
-func update(client *http.Client, recordNames arrayFlags) {
-	fmt.Println("Starting program successfully... Output will be displayed only when records are updated.")
-	//Infinite loop to update records over time
-	for {
-		//GETS current record information
-		url := "https://api.cloudflare.com/client/v4/zones/" + zone + "/dns_records"
-		body := httpRequest(client, "GET", url, nil, email, token, zone)
-		jsonData := unjsonify(body)
-
-		cfRecords := map[string]Result
-		for _, record := range jsonData.Result {
-			if recordType == "A" {
-				cfRecords[record.Name] = record
-			}
-		}
-
-		publicIP := getIP()
-		for _, name := range recordNames {
-			jsonData := []byte{}
-			if _, ok := cfRecords[name]; !ok {
-				jsonData = jsonify("A", name, publicIP, false)
-				httpRequest(client, "POST", url, jsonData, email, token, zone)
-				fmt.Println("Added Record: " + name + " Updated IP: " + publicIP)
-			} else {
-				// Update record if it does not match current IP
-				if cfRecords[name].Content != publicIP {
-					jsonData = jsonify(cfRecords[name].Type, recordName, publicIP, cfRecords[name].Proxied)
-					recordURL := url + "/" + cfRecords[name].Identifier
-					httpRequest(client, "PUT", recordURL, jsonData, email, token, zone)
-					fmt.Println("Updated Record: " + name + " Updated IP: " + publicIP)
-				}
-			}
-		}
-		time.Sleep(interval * time.Second) //Sleeping for n seconds
-	}
-}
-
 func main() {
-	getCredentials()
-
-	flag.Var(&recordToUpdate, "r", "Records (sub.domain.tld) to update with current IP")
+	recordsToUpdate := arrayFlags{}
+	flag.Var(&recordsToUpdate, "r", "Records (sub.domain.tld) to update with current IP")
 	flag.Parse()
 
-	timeout := time.Duration(120 * time.Second)
-	client := &http.Client{
-		Timeout: timeout,
+	cfClient, err := createCfClient()
+	if err != nil {
+		log.Fatalln(err)
 	}
 
-	go update(client, recordsToUpdate)
+	previousIp := "startup"
+	for {
+		publicIp, err := getPublicIP()
+		if err != nil {
+			log.Printf("failed to get public ip: %s\n", err)
+		}
+
+		if previousIp != publicIp {
+			log.Printf("ip change detected: %s -> %s\n", previousIp, publicIp)
+			cfRecords, err := cfClient.GetDnsRecords()
+			if err != nil {
+				log.Printf("failed to get cloudflare dns records: %s\n", err)
+			}
+
+			rMap := map[string]DnsRecord{}
+			for _, record := range cfRecords.Records {
+				rMap[record.Name] = record
+			}
+
+			for _, name := range recordsToUpdate {
+				if _, ok := rMap[name]; !ok {
+					if err := cfClient.CreateRecord(name, publicIp); err != nil {
+						log.Printf("failed to create record: %s\n", err)
+					}
+					log.Printf("added record: %s\n", name)
+				} else {
+					// Prevent additional calls to cloudflare if the IP hasn't changed, for example, on application startup
+					if rMap[name].Content != publicIp {
+						if err := cfClient.UpdateRecord(publicIp, rMap[name].Id); err != nil {
+							log.Printf("failed to update record: %s\n", err)
+						}
+						log.Printf("updated record: %s\n", name)
+					}
+				}
+			}
+			previousIp = publicIp
+		}
+		time.Sleep(3600 * time.Second)
+	}
 }
