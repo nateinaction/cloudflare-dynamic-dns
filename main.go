@@ -9,7 +9,7 @@ import (
 
 	"github.com/nateinaction/cloudflare-dynamic-dns/pkg/cloudflare"
 	"github.com/nateinaction/cloudflare-dynamic-dns/pkg/config"
-	"github.com/nateinaction/cloudflare-dynamic-dns/pkg/publicip"
+	"github.com/nateinaction/cloudflare-dynamic-dns/pkg/network"
 	"github.com/nateinaction/cloudflare-dynamic-dns/pkg/secret"
 )
 
@@ -29,10 +29,7 @@ func main() {
 		log.Fatalf("failed to parse secret: %s\n", err)
 	}
 
-	cf, err := cloudflare.NewClient(scrt)
-	if err != nil {
-		log.Fatalf("failed to create Cloudflare client: %s\n", err)
-	}
+	cf := cloudflare.NewClient(scrt)
 
 	cfgFile, err := os.ReadFile(*cfgPath)
 	if err != nil {
@@ -44,47 +41,46 @@ func main() {
 		log.Fatalf("failed to parse config: %s\n", err)
 	}
 
-	log.Printf("ensuring %d records", len(cfg.Records))
-
-	cfgZones := cfg.GetZones()
-	cfgRecords := cfg.GetRecords()
-	previousIp := "startup"
+	previousIp := &network.Ip{
+		V4: "startup",
+	}
 	for {
-		publicIp, err := publicip.Lookup()
+		publicIp, err := network.NewIp()
 		if err != nil {
 			log.Printf("failed to get public ip: %s\n", err)
 		}
 
-		if previousIp != publicIp {
-			log.Printf("ip change detected: %s -> %s\n", previousIp, publicIp)
-			cfRecords, err := cf.GetDnsRecords(cfgZones)
+		cfgZones := cfg.GetZones()
+		if !publicIp.Match(previousIp) {
+			log.Printf("ip change detected: %s -> %s\n", previousIp.V4, publicIp.V4)
+			cfRecords, err := cf.GetRecords(cfgZones)
 			if err != nil {
 				log.Printf("failed to get cloudflare dns records: %s\n", err)
 			}
 
-			rMap := map[string]cloudflare.CfRecord{}
-			for _, record := range cfRecords {
-				rMap[record.Name] = record
-			}
-
+			cfgRecords := cfg.GetRecords(publicIp)
 			for _, r := range cfgRecords {
-				if _, ok := rMap[r.Domain]; !ok {
-					if err := cf.CreateRecord(r, publicIp); err != nil {
-						log.Printf("failed to create record: %s\n", err)
+				if _, ok := cfRecords[r.Name]; !ok {
+					if err := cf.CreateRecord(r, cfgZones[r.ZoneId], publicIp); err != nil {
+						log.Printf("failed to create record %s: %s\n", r.Name, err)
+						continue
 					}
-					log.Printf("added record: %s\n", r.Domain)
+					log.Printf("added record: %s\n", r.Name)
 				} else {
-					// Prevent additional calls to cloudflare if the IP hasn't changed, for example, on application startup
-					if rMap[r.Domain].Content != publicIp {
-						if err := cf.UpdateRecord(r, rMap[r.Domain].Id, publicIp); err != nil {
-							log.Printf("failed to update record: %s\n", err)
+					// Prevent additional calls to cloudflare if the record has not changed
+					if !cfRecords[r.Name].Match(r) {
+						record := cfRecords[r.Name]
+						zone := cfgZones[cfRecords[r.Name].ZoneId]
+						if err := cf.UpdateRecord(record, zone, publicIp); err != nil {
+							log.Printf("failed to update record %s: %s\n", r.Name, err)
+							continue
 						}
-						log.Printf("updated record: %s\n", r.Domain)
+						log.Printf("updated record: %s\n", r.Name)
 					}
 				}
 			}
 			previousIp = publicIp
 		}
-		time.Sleep(120 * time.Second)
+		time.Sleep(2 * time.Minute)
 	}
 }

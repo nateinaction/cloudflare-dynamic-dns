@@ -10,7 +10,7 @@ format:
 	golangci-lint run --fix $(LINTERS)
 
 test:
-	go test ./...
+	go test ./... -cover
 
 build:
 	goreleaser release --snapshot --rm-dist

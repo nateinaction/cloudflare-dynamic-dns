@@ -15,11 +15,13 @@ On startup the service will look for a config file in `/etc/cloudflare-dynamic-d
 {
 	"records": [
 		{
-			"domain": "example.com",
+			"type": "A",
+			"name": "example.com",
 			"zone_id": "cloudflare_zone_id"
 		},
 		{
-			"domain": "sub.example.net",
+			"type": "A",
+			"name": "sub.example.net",
 			"zone_id": "cloudflare_zone_id",
 			"proxy": true,
 			"ttl": 300
